@@ -6,6 +6,7 @@ import time
 from SALib.sample import morris
 from SALib.analyze import morris as morris_analyze
 import matplotlib.pyplot as plt
+
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -14,24 +15,19 @@ problem = {
     'num_vars': 75,
     'names': ['NG', 'Dies', 'Coal', 'LPG', 'Prop', 'WC', 'FW', 'WP', 'GS', 'Peat', 'TDies', 'Petrol', 'El', 'LNG',
              'TLPG', 'CNG', 'AdBlue', 'RE', 'PRE', 'Non_RE', 'HE', 'Col', 'Steam', 'AL', 'AF', 'AAL', 'GL', 'FL',
-             'DegrL', 'Bog', 'OrgAL', 'Infra', 'DC', 'CT', 'FP', 'Sow', 'SH', 'GT', 'HO', 'LH', 'BR', 'TR', 'DK', 'GOS', 'DE',
+             'DegrL', 'Bog', 'OrgAL', 'Infra',  'DC', 'CT', 'FP', 'Sow', 'SH', 'GT', 'HO', 'LH', 'BR', 'TR', 'DK', 'GOS', 'DE',
              'FA', 'Wh', 'Pot', 'Oat', 'Vgt', 'Mix', 'Wood', 'BWh', 'Trit', 'FB', 'RS', 'CS',
              'Bar', 'SB', 'Rye', 'Peas', 'Lin', 'Hemp', 'Other', 'Lime', 'Dol', 'NH4NO3', '(NH4)2SO4', '(NH4)2HPO4',
              'CAN', 'Ca(NO3)2', 'KAS', '(NH4)(H2PO4)', 'NPK', 'Urea'],
     'bounds': [[0, 200]] * 75
 }
 
-# ==== Generate Morris sample (you can increase N later) ====
+# ==== Generate Morris sample ====
 param_values = morris.sample(problem, N=128, num_levels=8)
 print("Number of simulations:", len(param_values))
 
 # ==== Open Excel workbook ====
-wb = xw.Book(r"source")
-
-# ==== Improve Excel performance ====
-wb.app.calculation = 'manual'
-wb.app.screen_updating = False
-wb.app.display_alerts = False
+wb = xw.Book(r"Source")
 
 # ==== Define inputs per sheet ====
 input_config = {
@@ -51,23 +47,17 @@ output_config = {
     "Emisiju kopsavilkums": "C25"
 }
 
-# ==== Optimized model function ====
+# ==== Run model on Morris samples ====
 def model(x):
     idx = 0
     for sheet_name, cells in input_config.items():
         sh = wb.sheets[sheet_name]
-        values_to_write = x[idx:idx + len(cells)]
-        idx += len(cells)
+        for cell in cells:
+            sh[cell].value = x[idx]
+            idx += 1
 
-        # Write entire block if contiguous, else write cell-by-cell
-        try:
-            start_cell = cells[0]
-            sh.range(start_cell).options(transpose=True).value = values_to_write
-        except Exception:
-            for i, cell in enumerate(cells):
-                sh[cell].value = values_to_write[i]
-
-    wb.app.calculate()  # manual calculation
+    time.sleep(0.1)
+    wb.app.calculate()
 
     results = {}
     for sheet_name, cell in output_config.items():
@@ -75,28 +65,21 @@ def model(x):
         val = result_sheet[cell].value
         tries = 0
         while (val is None or isinstance(val, str)) and tries < 10:
-            time.sleep(0.05)
+            time.sleep(0.1)
             val = result_sheet[cell].value
             tries += 1
         results[sheet_name] = float(val) if val is not None else 0.0
 
     return results
 
-# ==== Run model on Morris samples ====
+# Collect outputs
 Y_results = {name: [] for name in output_config.keys()}
-start_time = time.time()
 
-for i, x in enumerate(param_values):
+for x in param_values:
     res = model(x)
     for name, val in res.items():
         Y_results[name].append(val)
 
-    # Progress feedback
-    if (i + 1) % 10 == 0 or i == len(param_values) - 1:
-        elapsed = time.time() - start_time
-        print(f"Run {i+1}/{len(param_values)} completed — elapsed {elapsed:.1f} s")
-
-# ==== Convert results to arrays ====
 for name in Y_results:
     Y_results[name] = np.array(Y_results[name])
     print(f"Output length for {name}: {len(Y_results[name])}")
@@ -109,9 +92,21 @@ for out_name, Y in Y_results.items():
         mean_val = np.nanmean(Y)
         Y = np.nan_to_num(Y, nan=mean_val)
 
-    Si = morris_analyze.analyze(problem, param_values, Y, conf_level=0.95, num_levels=4, print_to_console=False)
+    Si = morris_analyze.analyze(problem, param_values, Y, conf_level=0.95, num_levels=8, print_to_console=False)
     morris_results[out_name] = Si
 
+    # Ensure all arrays are same length
+    print(len(problem['names']), len(Si['mu']), len(Si['mu_star']), len(Si['sigma']))
+
+    n = min(len(problem['names']), len(Si['mu']))
+    morris_df = pd.DataFrame({
+    'Parameter': problem['names'][:n],
+    'Mu': Si['mu'][:n],
+    'Mu_Star': Si['mu_star'][:n],
+    'Sigma': Si['sigma'][:n]
+    })
+    
+    # Create DataFrame and export
     morris_df = pd.DataFrame({
         'Parameter': problem['names'],
         'Mu': Si['mu'],
@@ -124,6 +119,40 @@ for out_name, Y in Y_results.items():
     for name, mu_star, sigma in zip(problem['names'], Si['mu_star'], Si['sigma']):
         print(f"{name:25s} | Mu* = {mu_star:.4f} | Sigma = {sigma:.4f}")
 
+    # Plot Mu* values
+    plt.figure(figsize=(10, 6))
+    plt.bar(problem['names'], Si['mu_star'])
+    plt.ylabel("Mu* (Absolute Mean Elementary Effect)")
+    plt.title(f"Morris Sensitivity - Parameter Influence on {out_name}")
+    plt.xticks(rotation=90)
+    plt.tight_layout()
+    plt.show()
+
+    # Scatter plots of parameters vs output
+    df = pd.DataFrame(param_values, columns=problem['names'])
+    df['Output_Y'] = Y
+
+    n_params = len(problem['names'])
+    n_cols = 3
+    n_rows = (n_params + n_cols - 1) // n_cols
+
+    fig, axes = plt.subplots(nrows=n_rows, ncols=n_cols, figsize=(5*n_cols, 4*n_rows))
+    axes = axes.flatten()
+
+    for i, param in enumerate(problem['names']):
+        sns.regplot(
+            x=df[param], y=df['Output_Y'],
+            scatter_kws={'alpha':0.3, 's':15}, line_kws={'color':'red'}, ax=axes[i]
+        )
+        axes[i].set_title(f"{param} vs {out_name}")
+        axes[i].set_xlabel("Parameter Value")
+        axes[i].set_ylabel(out_name)
+
+    for j in range(i+1, len(axes)):
+        fig.delaxes(axes[j])
+
+    plt.tight_layout()
+    plt.show()
 
 # Scatter plots of parameters vs output
 X = param_values
@@ -190,15 +219,5 @@ writer.close()
 
 print(f"Scatter plot data exported to {output_file}")
 print(f"Sheets created: 1 (All_Data) + {len(input_names)} parameter sheets")
-
-    
-# Plot Mu* values
-plt.figure(figsize=(10, 6))
-plt.bar(problem['names'], Si['mu_star'])
-plt.ylabel("Mu* (Absolute Mean Elementary Effect)")
-plt.title(f"Morris Sensitivity - Parameter Influence on {out_name}")
-plt.xticks(rotation=90)
-plt.tight_layout()
-plt.show()
 
 print("Analysis complete in", round(time.time() - start_time, 2), "seconds.")
